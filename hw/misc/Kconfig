@@ -223,3 +223,6 @@ config XLNX_VERSAL_TRNG
     bool
 
 source macio/Kconfig
+
+config STM32H7_SYSCTRL
+    bool
