@@ -1,0 +1,89 @@
+STM32H745 (``stm32h745``, ``nucleo-h745zi``)
+=============================================
+
+The STM32H745 is a dual-core microcontroller from STMicroelectronics: an
+Arm Cortex-M7 at up to 480 MHz and a Cortex-M4 at up to 240 MHz, 2 MB of
+flash in two banks, and about 1 MB of RAM. This model covers the Cortex-M7
+domain. It is a behavioral model: firmware such as Zephyr boots and runs its
+real drivers on it, but clock trees, caches and bus timing are not modeled.
+
+Machines
+--------
+
+- ``stm32h745``: a bare STM32H745. The core clock is the machine property
+  ``sysclk-hz`` (default 480000000); set it to the frequency the firmware
+  configures, for example ``-machine stm32h745,sysclk-hz=100000000``.
+- ``nucleo-h745zi``: the ST NUCLEO-H745ZI-Q board, core clock 480 MHz.
+
+Supported devices
+-----------------
+
+- Cortex-M7 with FPU, 150 interrupts, 16 MPU regions. Boots from flash at
+  0x08000000.
+- Memories: ITCM, DTCM, flash (2 MB, writable through the flash interface),
+  AXI SRAM, SRAM1-4, backup SRAM, and the QUADSPI memory-mapped window (as
+  RAM).
+- RCC, PWR, embedded flash interface and hardware semaphores (HSEM):
+  registers latch, and the ready/status bits firmware polls follow their
+  enables (oscillators, PLLs, clock switch, voltage scaling, USB regulator).
+  The flash interface unlocks and erases sectors and banks; HSEM implements
+  1-step and 2-step locking with interrupts.
+- USART1-3, USART6, UART4/5/7/8 and LPUART1 (the STM32 USART v2 model shared
+  with STM32L4).
+- GPIOA-K.
+- FDCAN1 and FDCAN2 (Bosch M_CAN): the shared message RAM, TX buffers and the
+  TX event FIFO, RX FIFO 0/1, standard and extended acceptance filters, and
+  both interrupt lines. Classic CAN frames only.
+
+Everything else is mapped as an unimplemented device; ``-d unimp`` logs
+every access, which shows what a given firmware needs next.
+
+Not modeled: the Cortex-M4 domain, caches and their timing, DMA, timers,
+the QUADSPI controller, FMC, USB, Ethernet, RTC, watchdogs, ADC and the DWT
+cycle counter.
+
+Option bytes
+------------
+
+The ``stm32h7-sysctrl`` device reports the option bytes firmware reads at
+boot. Defaults are the factory values; override them with ``-global``:
+
+- ``optsr``: FLASH_OPTSR_CUR (default: BCM7 = 1, BCM4 = 1, RDP level 0).
+- ``boot-cm4-add``: FLASH_BOOT4_CUR (default 0x10000810: the M4 boots from
+  0x08100000).
+
+Serial ports
+------------
+
+``-serial`` options attach, in order: USART1, USART2, USART3, UART4, UART5,
+USART6, UART7, UART8, LPUART1. The NUCLEO-H745ZI-Q console (USART3) is the
+third.
+
+CAN
+---
+
+Each FDCAN controller sends and receives frames as SLCAN text lines
+(``t<iii><l><data>\r`` for standard and ``T<iiiiiiii><l><data>\r`` for
+extended identifiers) on a character device named ``fdcan1`` or ``fdcan2``:
+
+.. code-block:: bash
+
+  $ qemu-system-arm -machine nucleo-h745zi -kernel zephyr.elf \
+      -serial null -serial null -serial stdio \
+      -chardev socket,id=fdcan1,host=127.0.0.1,port=5600,server=on,wait=off
+
+``scripts/stm32h745/slcan_hub.py`` joins several such sockets (other QEMU
+instances, or host programs speaking SLCAN) into one bus.
+
+Boot examples
+-------------
+
+Zephyr ``hello_world`` built for ``nucleo_h745zi_q/stm32h745xx/m7``:
+
+.. code-block:: bash
+
+  $ qemu-system-arm -machine nucleo-h745zi -nographic -kernel zephyr.elf \
+      -serial null -serial null -serial mon:stdio
+
+For deterministic timing (guest time follows executed instructions), add
+``-icount shift=3,sleep=on``.

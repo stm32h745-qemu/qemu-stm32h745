@@ -675,3 +675,18 @@ config ARMSSE
     select UNIMP
     select SSE_COUNTER
     select SSE_TIMER
+
+config STM32H745_BOARDS
+    bool
+    default y
+    depends on TCG && ARM
+    select STM32H745_SOC
+
+config STM32H745_SOC
+    bool
+    select ARM_V7M
+    select STM32L4X5_USART
+    select STM32L4X5_GPIO
+    select STM32H7_SYSCTRL
+    select STM32H7_FDCAN
+    select UNIMP
