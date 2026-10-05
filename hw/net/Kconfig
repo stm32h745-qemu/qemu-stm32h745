@@ -163,3 +163,6 @@ config CAN_CTUCANFD_PCI
     default y if PCI_DEVICES
     depends on PCI && CAN_CTUCANFD
     select CAN_BUS
+
+config STM32H7_FDCAN
+    bool
