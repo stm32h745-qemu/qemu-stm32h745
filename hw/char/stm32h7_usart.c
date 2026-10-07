@@ -3,8 +3,9 @@
  *
  * Bytes from the chardev are queued and delivered one per character time at
  * the programmed baud rate (BRR, PRESC, OVER8, 10 bits per character), so
- * firmware sees a real line rate. A byte is held while the previous one is
- * unread, so emulation latency never causes an overrun (ORE is not raised). IDLE is flagged one character time after
+ * firmware sees a real line rate. As in the receive FIFO, a byte that has
+ * arrived while the previous one was unread is available as soon as RDR is
+ * read, and nothing is lost to emulation latency (ORE is not raised). IDLE is flagged one character time after
  * the line goes quiet (once per idle period, after at least one byte), and
  * the receiver timeout (RTOEN/RTOR) the same way. Transmission is
  * immediate (TXE/TC are set once the chardev has taken the byte).
@@ -220,6 +221,12 @@ static uint64_t usart_read(void *opaque, hwaddr off, unsigned size)
     case R_RDR:
         v = s->rdr;
         s->isr &= ~ISR_RXNE;
+        if (!fifo8_is_empty(&s->rxq)) {
+            /* Bytes that already arrived are in the receive FIFO: the next
+             * one is available as soon as RDR is read */
+            timer_del(s->rx_timer);
+            rx_tick(s);
+        }
         update(s);
         break;
     case R_TDR:   v = s->tdr; break;
