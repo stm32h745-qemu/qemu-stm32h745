@@ -92,3 +92,6 @@ config IP_OCTAL_232
     bool
     default y
     depends on IPACK
+
+config STM32H7_USART
+    bool

@@ -696,4 +696,6 @@ config STM32H745_SOC
     select STM32H7_OTG
     select STM32H7_IWDG
     select STM32H7_I2C
+    select STM32H7_USART
+    select STM32H7_DMA
     select UNIMP

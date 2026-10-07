@@ -3,8 +3,9 @@
  *
  * Memory map and interrupt numbers from RM0399 and the STM32H745 datasheet.
  * Modeled: memories, Cortex-M7 (150 IRQs), RCC/PWR/flash interface/HSEM
- * (stm32h7-sysctrl), USART1-3/6, UART4/5/7/8 and LPUART1 (USART v2 models
- * shared with STM32L4), GPIOA-K, FDCAN1/2 with the shared message RAM (SLCAN chardevs
+ * (stm32h7-sysctrl), USART1-3/6 and UART4/5/7/8 (stm32h7-usart: DMA requests,
+ * IDLE, line-rate reception from the RCC prescalers), LPUART1 (STM32L4 model),
+ * DMA1/DMA2 and DMAMUX1, GPIOA-K, FDCAN1/2 with the shared message RAM (SLCAN chardevs
  * "fdcan1"/"fdcan2"), QUADSPI with a 32 MiB NOR flash (backing image: the first
  * -drive if=mtd), ADC1-3 (inputs in mV from the adc-mv property), DBGMCU
  * IDCODE (STM32H745, revision V), RTC, RNG, IWDG1 (resets the machine on
@@ -12,7 +13,7 @@
  * for -device ...,bus=i2cN). Everything else is an unimplemented device that logs
  * accesses (-d unimp), which is how to find what to model next.
  *
- * Not modeled: the Cortex-M4 domain, caches and their timing, DMA, timers,
+ * Not modeled: the Cortex-M4 domain, caches and their timing, BDMA/MDMA, timers,
  * FMC, USB traffic.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -66,6 +67,9 @@ static const hwaddr usart_addr[STM32H745_NUM_USARTS] = {
     0x40005000, 0x40011400, 0x40007800, 0x40007C00,   /* UART5, USART6, UART7-8 */
 };
 static const int usart_irq[STM32H745_NUM_USARTS] = { 37, 38, 39, 52, 53, 71, 82, 83 };
+static const int usart_apb[STM32H745_NUM_USARTS] = { 2, 1, 1, 1, 1, 2, 1, 1 };
+/* DMAMUX1 request IDs (RX; TX is RX + 1) */
+static const int usart_dmareq[STM32H745_NUM_USARTS] = { 41, 43, 45, 63, 65, 71, 79, 81 };
 static const hwaddr fdcan_addr[STM32H745_NUM_FDCANS] = { 0x4000A000, 0x4000A400 };
 static const int fdcan_irq[STM32H745_NUM_FDCANS][2] = { { 19, 21 }, { 20, 22 } };
 
@@ -84,7 +88,7 @@ static void stm32h745_soc_init(Object *obj)
     object_initialize_child(obj, "armv7m", &s->armv7m, TYPE_ARMV7M);
     object_initialize_child(obj, "sysctrl", &s->sysctrl, TYPE_STM32H7_SYSCTRL);
     for (int i = 0; i < STM32H745_NUM_USARTS; i++) {
-        object_initialize_child(obj, "usart[*]", &s->usart[i], TYPE_STM32L4X5_USART);
+        object_initialize_child(obj, "usart[*]", &s->usart[i], TYPE_STM32H7_USART);
     }
     object_initialize_child(obj, "lpuart1", &s->lpuart1, TYPE_STM32L4X5_LPUART);
     for (int i = 0; i < STM32H745_NUM_GPIOS; i++) {
@@ -155,6 +159,18 @@ static bool apply_adc_inputs(Stm32h745SocState *s, Error **errp)
     return true;
 }
 
+typedef struct UsartClk {
+    Stm32h745SocState *soc;
+    int apb;
+} UsartClk;
+
+static uint64_t usart_kernel_hz(void *opaque)
+{
+    UsartClk *c = opaque;
+
+    return stm32h7_sysctrl_apb_hz(&c->soc->sysctrl, c->apb, clock_get_hz(c->soc->sysclk));
+}
+
 static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
 {
     Stm32h745SocState *s = STM32H745_SOC(dev);
@@ -186,6 +202,8 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
     if (*errp) {
         return;
     }
+    /* Erased flash reads 0xFF (images are loaded over it afterwards) */
+    memset(memory_region_get_ram_ptr(&s->flash), 0xFF, FLASH_SIZE);
 
     /* System memory (read-only): unique ID and flash size, which firmware
      * reads for its serial number and flash geometry. uid-seed varies the ID
@@ -233,10 +251,43 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(busdev, 3, HSEM_BASE);
     sysbus_connect_irq(busdev, 0, qdev_get_gpio_in(armv7m, HSEM1_IRQ));
 
+    /* DMA1, DMA2 and DMAMUX1 (outputs 0-7: DMA1 streams, 8-15: DMA2 streams) */
+    {
+        static const int dma_irq[2][8] = {
+            { 11, 12, 13, 14, 15, 16, 17, 47 }, { 56, 57, 58, 59, 60, 68, 69, 70 },
+        };
+        DeviceState *dma[2];
+
+        for (int d = 0; d < 2; d++) {
+            dma[d] = qdev_new("stm32h7-dma");
+            object_property_add_child(OBJECT(s), d ? "dma2" : "dma1", OBJECT(dma[d]));
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(dma[d]), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(dma[d]), 0, 0x40020000 + 0x400 * d);
+            for (int n = 0; n < 8; n++) {
+                sysbus_connect_irq(SYS_BUS_DEVICE(dma[d]), n,
+                                   qdev_get_gpio_in(armv7m, dma_irq[d][n]));
+            }
+        }
+        s->dmamux = qdev_new("stm32h7-dmamux");
+        object_property_add_child(OBJECT(s), "dmamux1", OBJECT(s->dmamux));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(s->dmamux), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(s->dmamux), 0, 0x40020800);
+        for (int c = 0; c < 16; c++) {
+            qdev_connect_gpio_out_named(s->dmamux, "out", c,
+                                        qdev_get_gpio_in_named(dma[c / 8], "req", c % 8));
+        }
+    }
+
     /* USARTs: serial_hd(0..7) = USART1, USART2, USART3, UART4, UART5,
      * USART6, UART7, UART8 */
     for (int i = 0; i < STM32H745_NUM_USARTS; i++) {
         DeviceState *u = DEVICE(&s->usart[i]);
+        UsartClk *clk = g_new(UsartClk, 1);
+
+        clk->soc = s;
+        clk->apb = usart_apb[i];
+        s->usart[i].kernel_hz = usart_kernel_hz;
+        s->usart[i].kernel_hz_opaque = clk;
 
         qdev_prop_set_chr(u, "chardev", serial_hd(i));
         qdev_connect_clock_in(u, "clk", s->pclk);
@@ -246,6 +297,12 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
         }
         sysbus_mmio_map(busdev, 0, usart_addr[i]);
         sysbus_connect_irq(busdev, 0, qdev_get_gpio_in(armv7m, usart_irq[i]));
+        qdev_connect_gpio_out_named(u, "dma-rx", 0,
+                                    qdev_get_gpio_in_named(s->dmamux, "req",
+                                                           usart_dmareq[i]));
+        qdev_connect_gpio_out_named(u, "dma-tx", 0,
+                                    qdev_get_gpio_in_named(s->dmamux, "req",
+                                                           usart_dmareq[i] + 1));
     }
 
     /* LPUART1 (the NUCLEO-H745ZI-Q console): serial_hd(8) */
@@ -383,9 +440,6 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
     create_unimplemented_device("SAI1-3",      0x40015800, 0x0C00);
     create_unimplemented_device("DFSDM1",      0x40017000, 0x400);
     create_unimplemented_device("HRTIM",       0x40017400, 0x400);
-    create_unimplemented_device("DMA1",        0x40020000, 0x400);
-    create_unimplemented_device("DMA2",        0x40020400, 0x400);
-    create_unimplemented_device("DMAMUX1",     0x40020800, 0x400);
     create_unimplemented_device("ART",         0x40024400, 0x400);
     create_unimplemented_device("ETH",         0x40028000, 0x2400);
     create_unimplemented_device("DCMI",        0x48020000, 0x400);

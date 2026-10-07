@@ -462,3 +462,19 @@ static void stm32h7_sysctrl_register(void)
     type_register_static(&stm32h7_sysctrl_info);
 }
 type_init(stm32h7_sysctrl_register)
+
+uint64_t stm32h7_sysctrl_apb_hz(Stm32h7SysctrlState *s, int apb, uint64_t core_hz)
+{
+    static const unsigned hdiv[8] = { 2, 4, 8, 16, 64, 128, 256, 512 };
+    uint32_t d1 = s->rcc[0x18 / 4], d2 = s->rcc[0x1C / 4], d3 = s->rcc[0x20 / 4];
+    uint32_t hpre = d1 & 0xF, ppre;
+    uint64_t hclk = (hpre & 8) ? core_hz / hdiv[hpre & 7] : core_hz;
+
+    switch (apb) {
+    case 1: ppre = (d2 >> 4) & 7; break;
+    case 2: ppre = (d2 >> 8) & 7; break;
+    case 3: ppre = (d1 >> 4) & 7; break;
+    default: ppre = (d3 >> 4) & 7; break;
+    }
+    return (ppre & 4) ? hclk >> ((ppre & 3) + 1) : hclk;
+}

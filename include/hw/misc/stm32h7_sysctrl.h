@@ -55,4 +55,8 @@ struct Stm32h7SysctrlState {
     qemu_irq cm4_boot;
 };
 
+/* Clock of APB bus apb (1 = D2 APB1, 2 = D2 APB2, 3 = D1 APB3, 4 = D3 APB4)
+ * for core clock core_hz, from the prescalers firmware set in RCC */
+uint64_t stm32h7_sysctrl_apb_hz(Stm32h7SysctrlState *s, int apb, uint64_t core_hz);
+
 #endif

@@ -8,6 +8,7 @@
 
 #include "hw/arm/armv7m.h"
 #include "hw/char/stm32l4x5_usart.h"
+#include "hw/char/stm32h7_usart.h"
 #include "hw/gpio/stm32l4x5_gpio.h"
 #include "hw/misc/stm32h7_sysctrl.h"
 #include "hw/net/stm32h7_fdcan.h"
@@ -28,12 +29,13 @@ struct Stm32h745SocState {
 
     ARMv7MState armv7m;
     Stm32h7SysctrlState sysctrl;
-    Stm32l4x5UsartBaseState usart[STM32H745_NUM_USARTS];
+    Stm32h7UsartState usart[STM32H745_NUM_USARTS];
     Stm32l4x5UsartBaseState lpuart1;
     Stm32l4x5GpioState gpio[STM32H745_NUM_GPIOS];
     Stm32h7FdcanState fdcan[STM32H745_NUM_FDCANS];
     Stm32h7QspiState qspi;
     Stm32h7AdcState adc12, adc3;
+    DeviceState *dmamux;
 
     MemoryRegion itcm, dtcm, flash, axisram, sram1, sram2, sram3, sram4, bkpsram;
     MemoryRegion fdcan_ram, sysmem, dbgmcu;
