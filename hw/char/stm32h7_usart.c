@@ -3,7 +3,8 @@
  *
  * Bytes from the chardev are queued and delivered one per character time at
  * the programmed baud rate (BRR, PRESC, OVER8, 10 bits per character), so
- * firmware sees a real line rate. IDLE is flagged one character time after
+ * firmware sees a real line rate. A byte is held while the previous one is
+ * unread, so emulation latency never causes an overrun (ORE is not raised). IDLE is flagged one character time after
  * the line goes quiet (once per idle period, after at least one byte), and
  * the receiver timeout (RTOEN/RTOR) the same way. Transmission is
  * immediate (TXE/TC are set once the chardev has taken the byte).
@@ -137,14 +138,14 @@ static void rx_tick(void *opaque)
         return;
     }
     if (!fifo8_is_empty(&s->rxq)) {
-        uint8_t b = fifo8_pop(&s->rxq);
-
         if (s->isr & ISR_RXNE) {
-            s->isr |= ISR_ORE;          /* previous byte not read in time */
-        } else {
-            s->rdr = b;
-            s->isr |= ISR_RXNE;
+            /* The previous byte is still unread: hold this one (emulation
+             * latency is not line timing; hardware has a 16-byte FIFO) */
+            timer_mod(s->rx_timer, now + char_ns(s));
+            return;
         }
+        s->rdr = fifo8_pop(&s->rxq);
+        s->isr |= ISR_RXNE;
         s->idle_armed = true;
         timer_mod(s->rx_timer, now + char_ns(s));
         qemu_chr_fe_accept_input(&s->chr);
