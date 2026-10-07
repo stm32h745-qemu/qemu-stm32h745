@@ -90,3 +90,4 @@ endif
 system_ss.add(when: ['CONFIG_USB', 'CONFIG_XEN_BUS', libusb], if_true: files('xen-usb.c'))
 
 modules += { 'hw-usb': hw_usb_modules }
+system_ss.add(when: 'CONFIG_STM32H7_OTG', if_true: files('stm32h7_otg.c'))

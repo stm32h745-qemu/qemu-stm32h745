@@ -49,3 +49,7 @@ config PMBUS
 config BCM2835_I2C
     bool
     select I2C
+
+config STM32H7_I2C
+    bool
+    select I2C

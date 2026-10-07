@@ -689,4 +689,11 @@ config STM32H745_SOC
     select STM32L4X5_GPIO
     select STM32H7_SYSCTRL
     select STM32H7_FDCAN
+    select STM32H7_QSPI
+    select STM32H7_ADC
+    select STM32H7_RTC
+    select STM32H7_RNG
+    select STM32H7_OTG
+    select STM32H7_IWDG
+    select STM32H7_I2C
     select UNIMP

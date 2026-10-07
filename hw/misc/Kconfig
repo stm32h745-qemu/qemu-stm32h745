@@ -226,3 +226,6 @@ source macio/Kconfig
 
 config STM32H7_SYSCTRL
     bool
+
+config STM32H7_RNG
+    bool

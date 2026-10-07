@@ -5,11 +5,15 @@
  * Modeled: memories, Cortex-M7 (150 IRQs), RCC/PWR/flash interface/HSEM
  * (stm32h7-sysctrl), USART1-3/6, UART4/5/7/8 and LPUART1 (USART v2 models
  * shared with STM32L4), GPIOA-K, FDCAN1/2 with the shared message RAM (SLCAN chardevs
- * "fdcan1"/"fdcan2"). Everything else is an unimplemented device that logs
+ * "fdcan1"/"fdcan2"), QUADSPI with a 32 MiB NOR flash (backing image: the first
+ * -drive if=mtd), ADC1-3 (inputs in mV from the adc-mv property), DBGMCU
+ * IDCODE (STM32H745, revision V), RTC, RNG, IWDG1 (resets the machine on
+ * timeout), USB OTG HS/FS with no cable attached, I2C1-4 (buses "i2c1".."i2c4"
+ * for -device ...,bus=i2cN). Everything else is an unimplemented device that logs
  * accesses (-d unimp), which is how to find what to model next.
  *
  * Not modeled: the Cortex-M4 domain, caches and their timing, DMA, timers,
- * QUADSPI controller (its memory-mapped window is RAM), FMC, USB, RTC, IWDG.
+ * FMC, USB traffic.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -24,6 +28,8 @@
 #include "hw/qdev-properties.h"
 #include "hw/qdev-properties-system.h"
 #include "hw/misc/unimp.h"
+#include "system/blockdev.h"
+#include "system/block-backend.h"
 
 #define ITCM_BASE     0x00000000
 #define FLASH_BASE    0x08000000
@@ -35,8 +41,13 @@
 #define SRAM3_BASE    0x30040000
 #define SRAM4_BASE    0x38000000
 #define BKPSRAM_BASE  0x38800000
+#define SYSMEM_BASE   0x1FF00000    /* system memory: boot ROM, UID, flash size */
+#define SYSMEM_SIZE   (128 * KiB)
+#define UID_OFF       0x1E800       /* 96-bit unique ID */
+#define FLASHSIZE_OFF 0x1E880       /* flash size in KiB, 16 bits */
 #define QSPI_MEM_BASE 0x90000000
-#define QSPI_MEM_SIZE (16 * MiB)
+#define QSPI_BASE     0x52005000
+#define QSPI_IRQ      92
 
 #define RCC_BASE      0x58024400
 #define PWR_BASE      0x58024800
@@ -82,9 +93,66 @@ static void stm32h745_soc_init(Object *obj)
     for (int i = 0; i < STM32H745_NUM_FDCANS; i++) {
         object_initialize_child(obj, "fdcan[*]", &s->fdcan[i], TYPE_STM32H7_FDCAN);
     }
+    object_initialize_child(obj, "qspi", &s->qspi, TYPE_STM32H7_QSPI);
+    object_initialize_child(obj, "adc12", &s->adc12, TYPE_STM32H7_ADC);
+    object_initialize_child(obj, "adc3", &s->adc3, TYPE_STM32H7_ADC);
     s->sysclk = qdev_init_clock_in(DEVICE(s), "sysclk", NULL, NULL, 0);
     s->refclk = clock_new(obj, "refclk");
     s->pclk = clock_new(obj, "pclk");
+}
+
+/* DBGMCU: IDCODE = STM32H745/755 (DEV_ID 0x450), revision V (0x2003) */
+static uint64_t dbgmcu_read(void *opaque, hwaddr off, unsigned size)
+{
+    Stm32h745SocState *s = opaque;
+
+    switch (off) {
+    case 0x00: return 0x20036450;
+    case 0x04: return s->dbgmcu_cr;
+    }
+    return 0;
+}
+
+static void dbgmcu_write(void *opaque, hwaddr off, uint64_t v, unsigned size)
+{
+    Stm32h745SocState *s = opaque;
+
+    if (off == 0x04) {
+        s->dbgmcu_cr = v;
+    }
+}
+
+static const MemoryRegionOps dbgmcu_ops = {
+    .read = dbgmcu_read,
+    .write = dbgmcu_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+/* adc-mv: comma-separated "<adc 1-3>.<channel>=<mV>" */
+static bool apply_adc_inputs(Stm32h745SocState *s, Error **errp)
+{
+    g_auto(GStrv) items = NULL;
+
+    if (!s->adc_mv || !*s->adc_mv) {
+        return true;
+    }
+    items = g_strsplit(s->adc_mv, ",", -1);
+    for (char **it = items; *it; it++) {
+        unsigned adc, ch, mv;
+
+        if (sscanf(*it, "%u.%u=%u", &adc, &ch, &mv) != 3 || adc < 1 || adc > 3 ||
+            ch >= STM32H7_ADC_CHANNELS) {
+            error_setg(errp, "adc-mv: bad item '%s' (want <adc 1-3>.<ch 0-19>=<mV>)",
+                       *it);
+            return false;
+        }
+        if (adc == 3) {
+            stm32h7_adc_set_input_mv(&s->adc3, 0, ch, mv);
+        } else {
+            stm32h7_adc_set_input_mv(&s->adc12, adc - 1, ch, mv);
+        }
+    }
+    return true;
 }
 
 static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
@@ -114,11 +182,30 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
     ram(s, &s->sram3, "stm32h745.sram3", SRAM3_BASE, 32 * KiB, errp);
     ram(s, &s->sram4, "stm32h745.sram4", SRAM4_BASE, 64 * KiB, errp);
     ram(s, &s->bkpsram, "stm32h745.bkpsram", BKPSRAM_BASE, 4 * KiB, errp);
-    ram(s, &s->qspi_mem, "stm32h745.qspi-mapped", QSPI_MEM_BASE, QSPI_MEM_SIZE, errp);
     ram(s, &s->fdcan_ram, "stm32h745.fdcan-ram", FDCAN_RAM_BASE, FDCAN_RAM_SIZE, errp);
     if (*errp) {
         return;
     }
+
+    /* System memory (read-only): unique ID and flash size, which firmware
+     * reads for its serial number and flash geometry. uid-seed varies the ID
+     * so several instances differ. */
+    if (!memory_region_init_rom(&s->sysmem, OBJECT(s), "stm32h745.sysmem",
+                                SYSMEM_SIZE, errp)) {
+        return;
+    }
+    {
+        uint8_t *p = memory_region_get_ram_ptr(&s->sysmem);
+        uint32_t uid[3] = { 0x00410022 ^ s->uid_seed, 0x3133510D + s->uid_seed,
+                            0x30393538 };
+
+        memset(p, 0xFF, SYSMEM_SIZE);
+        for (int i = 0; i < 3; i++) {
+            stl_le_p(p + UID_OFF + 4 * i, uid[i]);
+        }
+        stw_le_p(p + FLASHSIZE_OFF, FLASH_SIZE / KiB);
+    }
+    memory_region_add_subregion(get_system_memory(), SYSMEM_BASE, &s->sysmem);
 
     /* Cortex-M7, booting from BOOT_CM7_ADD0 = 0x0800 (flash) */
     armv7m = DEVICE(&s->armv7m);
@@ -209,6 +296,70 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
         sysbus_connect_irq(busdev, 1, qdev_get_gpio_in(armv7m, fdcan_irq[i][1]));
     }
 
+    /* QUADSPI + NOR flash; contents from the first -drive if=mtd, if any */
+    {
+        DriveInfo *dinfo = drive_get(IF_MTD, 0, 0);
+
+        if (dinfo) {
+            qdev_prop_set_drive_err(DEVICE(&s->qspi), "drive",
+                                    blk_by_legacy_dinfo(dinfo), &error_abort);
+        }
+        busdev = SYS_BUS_DEVICE(&s->qspi);
+        if (!sysbus_realize(busdev, errp)) {
+            return;
+        }
+        sysbus_mmio_map(busdev, 0, QSPI_BASE);
+        sysbus_mmio_map(busdev, 1, QSPI_MEM_BASE);
+        sysbus_connect_irq(busdev, 0, qdev_get_gpio_in(armv7m, QSPI_IRQ));
+    }
+
+    /* ADC1+ADC2 (shared interrupt) and ADC3 */
+    qdev_prop_set_uint32(DEVICE(&s->adc12), "num", 2);
+    if (!apply_adc_inputs(s, errp) ||
+        !sysbus_realize(SYS_BUS_DEVICE(&s->adc12), errp) ||
+        !sysbus_realize(SYS_BUS_DEVICE(&s->adc3), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->adc12), 0, 0x40022000);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->adc12), 0, qdev_get_gpio_in(armv7m, 18));
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->adc3), 0, 0x58026000);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->adc3), 0, qdev_get_gpio_in(armv7m, 127));
+
+    memory_region_init_io(&s->dbgmcu, OBJECT(s), &dbgmcu_ops, s, "stm32h745.dbgmcu",
+                          0x400);
+    memory_region_add_subregion(get_system_memory(), 0x5C001000, &s->dbgmcu);
+
+    /* RTC (alarm A/B: EXTI line 17 -> RTC_Alarm; wakeup -> RTC_WKUP), RNG */
+    sysbus_create_varargs("stm32h7-rtc", 0x58004000,
+                          qdev_get_gpio_in(armv7m, 41), qdev_get_gpio_in(armv7m, 3),
+                          NULL);
+    sysbus_create_simple("stm32h7-rng", 0x48021800, qdev_get_gpio_in(armv7m, 80));
+
+    /* Independent watchdog of the M7 (IWDG2 belongs to the M4) */
+    sysbus_create_simple("stm32h7-iwdg", 0x58004800, NULL);
+
+    /* USB OTG HS (OTG1) and FS (OTG2), no cable */
+    sysbus_create_simple("stm32h7-otg", 0x40040000, qdev_get_gpio_in(armv7m, 77));
+    sysbus_create_simple("stm32h7-otg", 0x40080000, qdev_get_gpio_in(armv7m, 101));
+
+    /* I2C1-4: event and error interrupts; bus "i2cN" */
+    {
+        static const hwaddr addr[4] = { 0x40005400, 0x40005800, 0x40005C00, 0x58001C00 };
+        static const int irq[4][2] = { { 31, 32 }, { 33, 34 }, { 72, 73 }, { 95, 96 } };
+
+        for (int i = 0; i < 4; i++) {
+            DeviceState *d = qdev_new("stm32h7-i2c");
+            g_autofree char *name = g_strdup_printf("i2c%d", i + 1);
+
+            qdev_prop_set_string(d, "bus-name", name);
+            object_property_add_child(OBJECT(s), name, OBJECT(d));
+            sysbus_realize_and_unref(SYS_BUS_DEVICE(d), &error_fatal);
+            sysbus_mmio_map(SYS_BUS_DEVICE(d), 0, addr[i]);
+            sysbus_connect_irq(SYS_BUS_DEVICE(d), 0, qdev_get_gpio_in(armv7m, irq[i][0]));
+            sysbus_connect_irq(SYS_BUS_DEVICE(d), 1, qdev_get_gpio_in(armv7m, irq[i][1]));
+        }
+    }
+
     /* Not modeled yet: accesses are logged with -d unimp */
     create_unimplemented_device("TIM2-7",      0x40000000, 0x1800);
     create_unimplemented_device("TIM12-14",    0x40001800, 0x0C00);
@@ -216,9 +367,6 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
     create_unimplemented_device("SPI2",        0x40003800, 0x400);
     create_unimplemented_device("SPI3",        0x40003C00, 0x400);
     create_unimplemented_device("SPDIFRX",     0x40004000, 0x400);
-    create_unimplemented_device("I2C1",        0x40005400, 0x400);
-    create_unimplemented_device("I2C2",        0x40005800, 0x400);
-    create_unimplemented_device("I2C3",        0x40005C00, 0x400);
     create_unimplemented_device("HDMI-CEC",    0x40006C00, 0x400);
     create_unimplemented_device("DAC1",        0x40007400, 0x400);
     create_unimplemented_device("CRS",         0x40008400, 0x400);
@@ -238,13 +386,9 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
     create_unimplemented_device("DMA1",        0x40020000, 0x400);
     create_unimplemented_device("DMA2",        0x40020400, 0x400);
     create_unimplemented_device("DMAMUX1",     0x40020800, 0x400);
-    create_unimplemented_device("ADC12",       0x40022000, 0x400);
     create_unimplemented_device("ART",         0x40024400, 0x400);
     create_unimplemented_device("ETH",         0x40028000, 0x2400);
-    create_unimplemented_device("USB1-OTG-HS", 0x40040000, 0x40000);
-    create_unimplemented_device("USB2-OTG-FS", 0x40080000, 0x40000);
     create_unimplemented_device("DCMI",        0x48020000, 0x400);
-    create_unimplemented_device("RNG",         0x48021800, 0x400);
     create_unimplemented_device("SDMMC2",      0x48022400, 0x400);
     create_unimplemented_device("RAMECC2",     0x48023000, 0x400);
     create_unimplemented_device("LTDC",        0x50001000, 0x1000);
@@ -253,33 +397,33 @@ static void stm32h745_soc_realize(DeviceState *dev, Error **errp)
     create_unimplemented_device("DMA2D",       0x52001000, 0x1000);
     create_unimplemented_device("JPEG",        0x52003000, 0x1000);
     create_unimplemented_device("FMC",         0x52004000, 0x1000);
-    create_unimplemented_device("QUADSPI",     0x52005000, 0x1000);
     create_unimplemented_device("SDMMC1",      0x52007000, 0x1000);
     create_unimplemented_device("RAMECC1",     0x52009000, 0x1000);
     create_unimplemented_device("EXTI",        0x58000000, 0x400);
     create_unimplemented_device("SYSCFG",      0x58000400, 0x400);
     create_unimplemented_device("SPI6",        0x58001400, 0x400);
-    create_unimplemented_device("I2C4",        0x58001C00, 0x400);
     create_unimplemented_device("LPTIM2-5",    0x58002400, 0x1000);
     create_unimplemented_device("COMP",        0x58003800, 0x400);
     create_unimplemented_device("VREFBUF",     0x58003C00, 0x400);
-    create_unimplemented_device("RTC",         0x58004000, 0x400);
-    create_unimplemented_device("IWDG1",       0x58004800, 0x400);
     create_unimplemented_device("IWDG2",       0x58004C00, 0x400);
     create_unimplemented_device("SAI4",        0x58005400, 0x400);
     create_unimplemented_device("CRC",         0x58024C00, 0x400);
     create_unimplemented_device("BDMA",        0x58025400, 0x400);
     create_unimplemented_device("DMAMUX2",     0x58025800, 0x400);
-    create_unimplemented_device("ADC3",        0x58026000, 0x400);
     create_unimplemented_device("RAMECC3",     0x58027000, 0x400);
-    create_unimplemented_device("DBGMCU",      0x5C001000, 0x400);
 }
+
+static const Property stm32h745_soc_props[] = {
+    DEFINE_PROP_UINT32("uid-seed", Stm32h745SocState, uid_seed, 0),
+    DEFINE_PROP_STRING("adc-mv", Stm32h745SocState, adc_mv),
+};
 
 static void stm32h745_soc_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = stm32h745_soc_realize;
+    device_class_set_props(dc, stm32h745_soc_props);
     dc->user_creatable = false;
 }
 
