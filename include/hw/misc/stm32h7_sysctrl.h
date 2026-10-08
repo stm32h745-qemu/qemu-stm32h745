@@ -57,6 +57,16 @@ struct Stm32h7SysctrlState {
 
 /* Clock of APB bus apb (1 = D2 APB1, 2 = D2 APB2, 3 = D1 APB3, 4 = D3 APB4)
  * for core clock core_hz, from the prescalers firmware set in RCC */
+/* RCC_RSR reset flags */
+#define STM32H7_RSR_BORRSTF   (1u << 21)
+#define STM32H7_RSR_PINRSTF   (1u << 22)
+#define STM32H7_RSR_PORRSTF   (1u << 23)
+#define STM32H7_RSR_SFTRSTF   (1u << 24)
+#define STM32H7_RSR_IWDG1RSTF (1u << 26)
+
+/* The cause (an RSR flag) of the system reset about to happen */
+void stm32h7_sysctrl_set_reset_cause(uint32_t rsr_flag);
+
 uint64_t stm32h7_sysctrl_apb_hz(Stm32h7SysctrlState *s, int apb, uint64_t core_hz);
 
 #endif

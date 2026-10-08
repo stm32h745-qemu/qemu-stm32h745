@@ -14,6 +14,7 @@
 #include "qemu/timer.h"
 #include "hw/sysbus.h"
 #include "system/watchdog.h"
+#include "hw/misc/stm32h7_sysctrl.h"
 #include "qom/object.h"
 
 #define TYPE_STM32H7_IWDG "stm32h7-iwdg"
@@ -39,7 +40,8 @@ static void reload(Stm32h7IwdgState *s)
 
 static void expired(void *opaque)
 {
-    qemu_log_mask(CPU_LOG_RESET, "stm32h7-iwdg: timeout\n");
+    qemu_log_mask(LOG_GUEST_ERROR, "stm32h7-iwdg: timeout\n");
+    stm32h7_sysctrl_set_reset_cause(STM32H7_RSR_IWDG1RSTF);
     watchdog_perform_action();
 }
 

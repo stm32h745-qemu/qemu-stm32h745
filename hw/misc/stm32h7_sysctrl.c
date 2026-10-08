@@ -371,9 +371,25 @@ OPS(pwr)
 OPS(flash)
 OPS(hsem)
 
+/* Cause of the next system reset, for RCC_RSR (set by the IWDG model);
+ * any other reset after power-on is a software reset (AIRCR SYSRESETREQ) */
+static uint32_t pending_reset_cause;
+static bool powered_on;
+
+void stm32h7_sysctrl_set_reset_cause(uint32_t rsr_flag)
+{
+    pending_reset_cause = rsr_flag;
+}
+
 static void stm32h7_sysctrl_reset(DeviceState *dev)
 {
     Stm32h7SysctrlState *s = STM32H7_SYSCTRL(dev);
+    /* RSR keeps its flags until firmware writes RMVF; every reset adds
+     * PINRSTF (NRST is driven) and its cause */
+    uint32_t rsr = powered_on ? s->rcc[RCC_RSR / 4] : 0;
+    uint32_t cause = powered_on ? (pending_reset_cause ? pending_reset_cause
+                                                       : STM32H7_RSR_SFTRSTF)
+                                : STM32H7_RSR_PORRSTF | STM32H7_RSR_BORRSTF;
 
     memset(s->rcc, 0, sizeof(s->rcc));
     memset(s->pwr, 0, sizeof(s->pwr));
@@ -382,7 +398,13 @@ static void stm32h7_sysctrl_reset(DeviceState *dev)
     s->rcc[0x28 / 4] = 0x02020200;                  /* PLLCKSELR */
     s->rcc[0x2C / 4] = 0x01FF0000;                  /* PLLCFGR */
     s->rcc[0x30 / 4] = 0x01010280;                  /* PLL1DIVR */
-    s->rcc[RCC_RSR / 4] = BIT(22) | BIT(23);        /* PINRSTF | PORRSTF */
+    s->rcc[RCC_RSR / 4] = rsr | cause | STM32H7_RSR_PINRSTF;
+    if (powered_on) {
+        qemu_log_mask(LOG_GUEST_ERROR, "stm32h7: system reset (%s)\n",
+                      cause == STM32H7_RSR_IWDG1RSTF ? "IWDG1 watchdog" : "software");
+    }
+    powered_on = true;
+    pending_reset_cause = 0;
     s->pwr[0x00 / 4] = 0xF000C000;                  /* CR1 */
     s->pwr[PWR_CR3 / 4] = 0x00000006;               /* SDEN | LDOEN */
     s->pwr[PWR_D3CR / 4] = 1u << 14;                /* VOS3 */
