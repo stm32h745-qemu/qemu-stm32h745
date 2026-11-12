@@ -5,6 +5,13 @@
  * global filter, interrupt lines. Classic CAN frames only (no CAN FD data
  * phase, no bit timing, no bus errors).
  *
+ * STM32G4 variant ("g4" property, RM0440): the same M_CAN core with the
+ * register map STM32 gave it on the G4 (some registers moved or absent, the
+ * IR/IE/ILS bits compacted) and a fixed message RAM layout per instance
+ * (28 standard filters, 8 extended filters, 3+3 RX FIFO elements, 3 TX event
+ * elements, 3 TX buffers, 64 byte data fields; 0x350 bytes at "msg-ram-offset"
+ * in the shared SRAMCAN).
+ *
  * The bus is a chardev carrying SLCAN text lines (t<iii><l><data>\r and
  * T<iiiiiiii><l><data>\r), so firmware running on the model can share a CAN
  * bus with other emulated nodes or host-side models through a socket hub.
@@ -75,6 +82,10 @@ static uint32_t *ram(Stm32h7FdcanState *s, uint32_t byte_off)
     uint8_t *base = memory_region_get_ram_ptr(s->msg_ram);
     uint64_t size = memory_region_size(s->msg_ram);
 
+    if (s->g4) {
+        byte_off += s->ram_offset;
+    }
+
     if (byte_off + 4 > size) {
         qemu_log_mask(LOG_GUEST_ERROR, "stm32h7-fdcan: message RAM offset 0x%x out of range\n",
                       byte_off);
@@ -86,6 +97,53 @@ static uint32_t *ram(Stm32h7FdcanState *s, uint32_t byte_off)
 static int elem_words(uint32_t dscode)
 {
     return 2 + data_size_bytes[dscode & 7] / 4;
+}
+
+/* ---- message RAM geometry: from registers (H7), fixed (G4) ---- */
+
+#define G4_SID_BASE   0x000
+#define G4_XID_BASE   0x070
+#define G4_RXF0_BASE  0x0B0
+#define G4_RXF1_BASE  0x188
+#define G4_TXEF_BASE  0x260
+#define G4_TXB_BASE   0x278
+#define G4_FIFO_ELEMS 3
+#define G4_ELEM_WORDS 18
+
+static uint32_t rx_base(Stm32h7FdcanState *s, int fifo)
+{
+    return s->g4 ? (fifo ? G4_RXF1_BASE : G4_RXF0_BASE) :
+                   (R(s, fifo ? RXF1C : RXF0C) & 0xFFFC);
+}
+
+static uint32_t rx_size(Stm32h7FdcanState *s, int fifo)
+{
+    return s->g4 ? G4_FIFO_ELEMS : (R(s, fifo ? RXF1C : RXF0C) >> 16) & 0x7F;
+}
+
+static uint32_t rx_words(Stm32h7FdcanState *s, int fifo)
+{
+    return s->g4 ? G4_ELEM_WORDS : elem_words(fifo ? (R(s, RXESC) >> 4) : R(s, RXESC));
+}
+
+static uint32_t txef_base(Stm32h7FdcanState *s)
+{
+    return s->g4 ? G4_TXEF_BASE : (R(s, TXEFC) & 0xFFFC);
+}
+
+static uint32_t txef_size(Stm32h7FdcanState *s)
+{
+    return s->g4 ? G4_FIFO_ELEMS : (R(s, TXEFC) >> 16) & 0x3F;
+}
+
+static uint32_t txb_base(Stm32h7FdcanState *s)
+{
+    return s->g4 ? G4_TXB_BASE : (R(s, TXBC) & 0xFFFC);
+}
+
+static uint32_t txb_words(Stm32h7FdcanState *s)
+{
+    return s->g4 ? G4_ELEM_WORDS : elem_words(R(s, TXESC));
 }
 
 static void update_irq(Stm32h7FdcanState *s)
@@ -123,9 +181,8 @@ static void slcan_send(Stm32h7FdcanState *s, uint32_t id, bool xtd, bool rtr, in
 
 static void tx_event(Stm32h7FdcanState *s, uint32_t t0, uint32_t t1)
 {
-    uint32_t efc = R(s, TXEFC);
     uint32_t efs = R(s, TXEFS);
-    uint32_t size = (efc >> 16) & 0x3F;
+    uint32_t size = txef_size(s);
     uint32_t fill = efs & 0x3F;
     uint32_t get = (efs >> 8) & 0x1F;
     uint32_t put = (efs >> 16) & 0x1F;
@@ -138,7 +195,7 @@ static void tx_event(Stm32h7FdcanState *s, uint32_t t0, uint32_t t1)
         R(s, IR) |= IR_TEFL;
         return;
     }
-    e = ram(s, (efc & 0xFFFC) + put * 8);
+    e = ram(s, txef_base(s) + put * 8);
     if (e) {
         e[0] = t0;
         e[1] = (t1 & 0xFF0F0000) | (1u << 22);  /* MM, DLC, EDL/BRS, ET = 01 */
@@ -152,8 +209,7 @@ static void tx_event(Stm32h7FdcanState *s, uint32_t t0, uint32_t t1)
 
 static void transmit(Stm32h7FdcanState *s, uint32_t requests)
 {
-    uint32_t txbc = R(s, TXBC);
-    uint32_t words = elem_words(R(s, TXESC));
+    uint32_t words = txb_words(s);
 
     for (int i = 0; i < 32; i++) {
         uint32_t *e;
@@ -165,7 +221,7 @@ static void transmit(Stm32h7FdcanState *s, uint32_t requests)
         if (!(requests & BIT(i))) {
             continue;
         }
-        e = ram(s, (txbc & 0xFFFC) + i * words * 4);
+        e = ram(s, txb_base(s) + i * words * 4);
         if (!e) {
             continue;
         }
@@ -193,8 +249,8 @@ static void transmit(Stm32h7FdcanState *s, uint32_t requests)
 static uint32_t txfqs(Stm32h7FdcanState *s)
 {
     uint32_t txbc = R(s, TXBC);
-    uint32_t ndtb = (txbc >> 16) & 0x3F;
-    uint32_t tfqs = (txbc >> 24) & 0x3F;
+    uint32_t ndtb = s->g4 ? 0 : (txbc >> 16) & 0x3F;
+    uint32_t tfqs = s->g4 ? G4_FIFO_ELEMS : (txbc >> 24) & 0x3F;
     uint32_t total = MIN(ndtb + tfqs, 32);
     uint32_t free = 0, put = 0;
     bool found = false;
@@ -218,13 +274,15 @@ static int filter(Stm32h7FdcanState *s, uint32_t id, bool xtd, int *fidx)
 {
     uint32_t gfc = R(s, GFC);
     uint32_t fc = R(s, xtd ? XIDFC : SIDFC);
-    uint32_t count = (fc >> 16) & (xtd ? 0x7F : 0xFF);
+    uint32_t count = s->g4 ? (xtd ? (gfc >> 24) & 0xF : (gfc >> 16) & 0x1F) :
+                             (fc >> 16) & (xtd ? 0x7F : 0xFF);
+    uint32_t fbase = s->g4 ? (xtd ? G4_XID_BASE : G4_SID_BASE) : (fc & 0xFFFC);
     uint32_t mask = xtd ? (R(s, XIDAM) & 0x1FFFFFFF) : 0x7FF;
     uint32_t mid = id & mask;
     uint32_t nonmatch;
 
     for (uint32_t i = 0; i < count; i++) {
-        uint32_t *e = ram(s, (fc & 0xFFFC) + i * (xtd ? 8 : 4));
+        uint32_t *e = ram(s, fbase + i * (xtd ? 8 : 4));
         uint32_t type, cfg, id1, id2;
         bool match = false;
 
@@ -267,15 +325,13 @@ static int filter(Stm32h7FdcanState *s, uint32_t id, bool xtd, int *fidx)
 static void store_rx(Stm32h7FdcanState *s, int fifo, uint32_t id, bool xtd, bool rtr,
                      int dlc, const uint8_t *data, int fidx)
 {
-    hwaddr c = fifo ? RXF1C : RXF0C;
     hwaddr st = fifo ? RXF1S : RXF0S;
-    uint32_t cfg = R(s, c);
-    uint32_t size = (cfg >> 16) & 0x7F;
+    uint32_t size = rx_size(s, fifo);
     uint32_t status = R(s, st);
     uint32_t fill = status & 0x7F;
     uint32_t get = (status >> 8) & 0x3F;
     uint32_t put = (status >> 16) & 0x3F;
-    uint32_t words = elem_words(fifo ? (R(s, RXESC) >> 4) : R(s, RXESC));
+    uint32_t words = rx_words(s, fifo);
     uint32_t *e;
 
     if (size == 0 || fill >= size) {
@@ -284,7 +340,7 @@ static void store_rx(Stm32h7FdcanState *s, int fifo, uint32_t id, bool xtd, bool
         s->rx_dropped++;
         return;
     }
-    e = ram(s, (cfg & 0xFFFC) + put * words * 4);
+    e = ram(s, rx_base(s, fifo) + put * words * 4);
     if (!e) {
         return;
     }
@@ -371,12 +427,146 @@ static void chr_receive(void *opaque, const uint8_t *buf, int size)
     }
 }
 
-/* ---- registers ---- */
+/* ---- STM32G4 register map -> M_CAN offsets and IR/IE/ILS bit layout ---- */
+
+#define G4_CKDIV 0x100
+
+static int g4_reg(hwaddr off)
+{
+    switch (off) {
+    case 0x80: return GFC;
+    case 0x84: return XIDAM;
+    case 0x90: return RXF0S;
+    case 0x94: return RXF0A;
+    case 0x98: return RXF1S;
+    case 0x9C: return RXF1A;
+    case 0xC0: return TXBC;
+    case 0xC4: return TXFQS;
+    case 0xC8: return TXBRP;
+    case 0xCC: return TXBAR;
+    case 0xD0: return TXBCR;
+    case 0xD4: return TXBTO;
+    case 0xD8: return TXBCF;
+    case 0xDC: return TXBTIE;
+    case 0xE0: return TXBCIE;
+    case 0xE4: return TXEFS;
+    case 0xE8: return TXEFA;
+    case 0x88:                          /* HPMS */
+        return -1;
+    }
+    return off < 0x80 ? (int)off : -1;
+}
+
+/* IR/IE: STM32G4 bit layout <-> M_CAN bit layout */
+static uint32_t ir_g4_to_mcan(uint32_t b)
+{
+    return ((b & 0xFF0000u) << 6) | ((b & 0xF800u) << 3) | ((b & 0x7F0u) << 2) |
+           ((b & 0xEu) << 1) | (b & 1u);
+}
+
+static uint32_t ir_mcan_to_g4(uint32_t b)
+{
+    return ((b & 0x3FC00000u) >> 6) | ((b & 0x7C000u) >> 3) | ((b & 0x1FC0u) >> 2) |
+           ((b & 0x1Cu) >> 1) | (b & 1u);
+}
+
+/* ILS: one G4 bit selects the line of a group of interrupt sources */
+static const uint32_t g4_ils_groups[7] = {
+    0x0000000F, 0x000000F0, 0x00000F00, 0x0000F000, 0x000F0000, 0x00700000, 0x3F800000,
+};
+
+static uint32_t ils_g4_to_mcan(uint32_t b)
+{
+    uint32_t v = 0;
+
+    for (int i = 0; i < 7; i++) {
+        if (b & BIT(i)) {
+            v |= g4_ils_groups[i];
+        }
+    }
+    return v;
+}
+
+static uint32_t ils_mcan_to_g4(uint32_t m)
+{
+    uint32_t v = 0;
+
+    for (int i = 0; i < 7; i++) {
+        if (m & g4_ils_groups[i]) {
+            v |= BIT(i);
+        }
+    }
+    return v;
+}
+
+static uint64_t fdcan_read_m(Stm32h7FdcanState *s, hwaddr off);
+static void fdcan_write_m(Stm32h7FdcanState *s, hwaddr off, uint64_t val);
 
 static uint64_t fdcan_read(void *opaque, hwaddr off, unsigned size)
 {
     Stm32h7FdcanState *s = opaque;
+    int reg;
 
+    if (!s->g4) {
+        return fdcan_read_m(s, off);
+    }
+    if (off == G4_CKDIV) {
+        return s->ckdiv;
+    }
+    reg = g4_reg(off);
+    if (reg < 0) {
+        return 0;
+    }
+    switch (reg) {
+    case IR:
+    case IE:
+        return ir_mcan_to_g4(fdcan_read_m(s, reg));
+    case ILS:
+        return ils_mcan_to_g4(fdcan_read_m(s, reg));
+    case GFC:
+        return fdcan_read_m(s, reg);
+    case TXBC:
+        return R(s, TXBC) & BIT(24);
+    }
+    return fdcan_read_m(s, reg);
+}
+
+static void fdcan_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
+{
+    Stm32h7FdcanState *s = opaque;
+    int reg;
+
+    if (!s->g4) {
+        fdcan_write_m(s, off, val);
+        return;
+    }
+    if (off == G4_CKDIV) {
+        s->ckdiv = val;
+        return;
+    }
+    reg = g4_reg(off);
+    if (reg < 0) {
+        return;
+    }
+    switch (reg) {
+    case IR:
+    case IE:
+        val = ir_g4_to_mcan(val);
+        break;
+    case ILS:
+        val = ils_g4_to_mcan(val);
+        break;
+    case TXBC:
+        val &= BIT(24);
+        break;
+    }
+    fdcan_write_m(s, reg, val);
+}
+
+/* ---- registers ---- */
+
+static uint64_t fdcan_read_m(Stm32h7FdcanState *s, hwaddr off)
+{
     switch (off) {
     case CREL: return 0x32141218;       /* M_CAN 3.2.1 */
     case ENDN: return 0x87654321;
@@ -386,9 +576,8 @@ static uint64_t fdcan_read(void *opaque, hwaddr off, unsigned size)
     return off < sizeof(s->regs) ? s->regs[off / 4] : 0;
 }
 
-static void fdcan_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
+static void fdcan_write_m(Stm32h7FdcanState *s, hwaddr off, uint64_t val)
 {
-    Stm32h7FdcanState *s = opaque;
     uint32_t v;
 
     switch (off) {
@@ -407,8 +596,7 @@ static void fdcan_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
     case RXF0A:
     case RXF1A: {
         hwaddr st = off == RXF0A ? RXF0S : RXF1S;
-        hwaddr c = off == RXF0A ? RXF0C : RXF1C;
-        uint32_t fifo_size = (R(s, c) >> 16) & 0x7F;
+        uint32_t fifo_size = rx_size(s, off == RXF1A);
         uint32_t status = R(s, st);
         uint32_t fill = status & 0x7F;
         uint32_t idx = val & 0x3F;
@@ -429,7 +617,7 @@ static void fdcan_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
     }
     case TXEFA: {
         uint32_t efs = R(s, TXEFS);
-        uint32_t ef_size = (R(s, TXEFC) >> 16) & 0x3F;
+        uint32_t ef_size = txef_size(s);
         uint32_t fill = efs & 0x3F;
         uint32_t get = (efs >> 8) & 0x1F, put = (efs >> 16) & 0x1F;
         uint32_t idx = val & 0x1F, released;
@@ -507,6 +695,8 @@ static void fdcan_init(Object *obj)
 static const Property fdcan_props[] = {
     DEFINE_PROP_CHR("chardev", Stm32h7FdcanState, chr),
     DEFINE_PROP_LINK("msg-ram", Stm32h7FdcanState, msg_ram, TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_BOOL("g4", Stm32h7FdcanState, g4, false),
+    DEFINE_PROP_UINT32("msg-ram-offset", Stm32h7FdcanState, ram_offset, 0),
 };
 
 static void fdcan_class_init(ObjectClass *klass, void *data)

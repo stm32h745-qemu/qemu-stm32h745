@@ -20,6 +20,9 @@ struct Stm32h7FdcanState {
     CharBackend chr;            /* SLCAN text frames */
     qemu_irq irq[2];            /* interrupt line 0 / line 1 */
 
+    bool g4;                    /* STM32G4 register map and fixed message RAM layout */
+    uint32_t ram_offset;        /* G4: this instance's part of the shared SRAMCAN */
+    uint32_t ckdiv;             /* G4: clock calibration unit divider (FDCAN_CKDIV) */
     uint32_t regs[0x100 / 4];
     char line[40];
     uint32_t line_len;
