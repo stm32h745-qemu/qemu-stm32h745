@@ -159,3 +159,6 @@ system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
 # HPPA devices
 system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
 system_ss.add(when: 'CONFIG_STM32H7_RNG', if_true: files('stm32h7_rng.c'))
+system_ss.add(when: 'CONFIG_STM32G4_SYSCTRL', if_true: files('stm32g4_sysctrl.c'))
+system_ss.add(when: 'CONFIG_STM32G4_EXTI', if_true: files('stm32g4_exti.c'))
+system_ss.add(when: 'CONFIG_AC_SOURCE', if_true: files('ac_source.c'))

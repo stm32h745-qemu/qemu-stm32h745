@@ -33,3 +33,6 @@ config XLNX_CSU_DMA
 
 config STM32H7_DMA
     bool
+
+config STM32G4_DMA
+    bool

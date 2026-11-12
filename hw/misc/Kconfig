@@ -229,3 +229,12 @@ config STM32H7_SYSCTRL
 
 config STM32H7_RNG
     bool
+
+config STM32G4_SYSCTRL
+    bool
+
+config STM32G4_EXTI
+    bool
+
+config AC_SOURCE
+    bool

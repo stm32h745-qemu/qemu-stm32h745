@@ -381,6 +381,11 @@ void stm32h7_sysctrl_set_reset_cause(uint32_t rsr_flag)
     pending_reset_cause = rsr_flag;
 }
 
+uint32_t stm32h7_sysctrl_get_reset_cause(void)
+{
+    return pending_reset_cause;
+}
+
 static void stm32h7_sysctrl_reset(DeviceState *dev)
 {
     Stm32h7SysctrlState *s = STM32H7_SYSCTRL(dev);

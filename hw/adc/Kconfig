@@ -3,3 +3,6 @@ config STM32F2XX_ADC
 
 config STM32H7_ADC
     bool
+
+config STM32G4_ADC
+    bool

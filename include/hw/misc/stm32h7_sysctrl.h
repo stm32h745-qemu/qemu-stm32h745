@@ -66,6 +66,7 @@ struct Stm32h7SysctrlState {
 
 /* The cause (an RSR flag) of the system reset about to happen */
 void stm32h7_sysctrl_set_reset_cause(uint32_t rsr_flag);
+uint32_t stm32h7_sysctrl_get_reset_cause(void);
 
 uint64_t stm32h7_sysctrl_apb_hz(Stm32h7SysctrlState *s, int apb, uint64_t core_hz);
 
