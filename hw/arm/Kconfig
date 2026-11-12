@@ -699,3 +699,29 @@ config STM32H745_SOC
     select STM32H7_USART
     select STM32H7_DMA
     select UNIMP
+
+config STM32G491_BOARDS
+    bool
+    default y
+    depends on TCG && ARM
+    select STM32G491_SOC
+
+config STM32G491_SOC
+    bool
+    select ARM_V7M
+    select STM32G4_SYSCTRL
+    select STM32G4_GPIO
+    select STM32G4_EXTI
+    select STM32G4_ADC
+    select STM32G4_DMA
+    select STM32G4_TIM
+    select AC_SOURCE
+    select STM32H7_SYSCTRL
+    select STM32H7_FDCAN
+    select STM32H7_USART
+    select STM32H7_IWDG
+    select STM32H7_RNG
+    select STM32H7_I2C
+    select OR_IRQ
+    select SPLIT_IRQ
+    select UNIMP
