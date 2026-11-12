@@ -58,5 +58,12 @@ def main():
     return 0
 
 
+def run():
+    try:
+        return main()
+    except BrokenPipeError:
+        return 0
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())
