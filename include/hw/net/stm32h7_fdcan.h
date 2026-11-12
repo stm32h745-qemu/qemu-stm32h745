@@ -8,6 +8,7 @@
 #include "hw/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
+#include "qemu/timer.h"
 
 #define TYPE_STM32H7_FDCAN "stm32h7-fdcan"
 OBJECT_DECLARE_SIMPLE_TYPE(Stm32h7FdcanState, STM32H7_FDCAN)
@@ -27,6 +28,15 @@ struct Stm32h7FdcanState {
     char line[40];
     uint32_t line_len;
     uint64_t tx_frames, rx_frames, rx_dropped;
+    /* RX pacing ("rx-frame-ns" > 0): frames from the chardev wait here and
+     * enter the controller at most one per frame time on the virtual clock,
+     * as frames on a real bus do; 0: at once (the default) */
+    uint32_t rx_frame_ns;
+    QEMUTimer *rx_timer;
+    char rxq[64][40];
+    uint8_t rxq_len[64];
+    uint32_t rxq_head, rxq_count;
+    int64_t rx_next_ns;
 };
 
 #endif

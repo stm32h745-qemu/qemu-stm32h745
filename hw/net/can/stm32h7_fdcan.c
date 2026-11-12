@@ -405,6 +405,45 @@ static void receive_line(Stm32h7FdcanState *s, const char *l, uint32_t len)
     }
 }
 
+static void rx_deliver(void *opaque)
+{
+    Stm32h7FdcanState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    while (s->rxq_count && now >= s->rx_next_ns) {
+        uint32_t i = s->rxq_head;
+
+        s->rxq_head = (s->rxq_head + 1) % 64;
+        s->rxq_count--;
+        receive_line(s, s->rxq[i], s->rxq_len[i]);
+        s->rx_next_ns = now + s->rx_frame_ns;
+    }
+    if (s->rxq_count) {
+        timer_mod(s->rx_timer, s->rx_next_ns);
+    }
+}
+
+static void rx_line(Stm32h7FdcanState *s, const char *l, uint32_t len)
+{
+    if (!s->rx_frame_ns) {
+        receive_line(s, l, len);
+        return;
+    }
+    if (s->rxq_count == 64) {
+        s->rx_dropped++;                /* the bus model's own queue: never on a real bus */
+        qemu_log_mask(LOG_GUEST_ERROR, "stm32h7-fdcan: RX pacing queue full, frame dropped\n");
+        return;
+    }
+    {
+        uint32_t i = (s->rxq_head + s->rxq_count) % 64;
+
+        memcpy(s->rxq[i], l, len);
+        s->rxq_len[i] = len;
+        s->rxq_count++;
+    }
+    rx_deliver(s);
+}
+
 static int chr_can_receive(void *opaque)
 {
     return 64;
@@ -417,7 +456,7 @@ static void chr_receive(void *opaque, const uint8_t *buf, int size)
     for (int i = 0; i < size; i++) {
         char c = buf[i];
         if (c == '\r' || c == '\n') {
-            receive_line(s, s->line, s->line_len);
+            rx_line(s, s->line, s->line_len);
             s->line_len = 0;
         } else if (s->line_len < sizeof(s->line)) {
             s->line[s->line_len++] = c;
@@ -669,6 +708,11 @@ static void fdcan_reset(DeviceState *dev)
     R(s, 0x0C) = 0x00000A33;            /* DBTP */
     R(s, XIDAM) = 0x1FFFFFFF;
     s->line_len = 0;
+    s->rxq_head = s->rxq_count = 0;
+    s->rx_next_ns = 0;
+    if (s->rx_timer) {
+        timer_del(s->rx_timer);
+    }
 }
 
 static void fdcan_realize(DeviceState *dev, Error **errp)
@@ -679,6 +723,7 @@ static void fdcan_realize(DeviceState *dev, Error **errp)
         error_setg(errp, "stm32h7-fdcan: msg-ram link not set");
         return;
     }
+    s->rx_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rx_deliver, s);
     qemu_chr_fe_set_handlers(&s->chr, chr_can_receive, chr_receive, NULL, NULL, s, NULL, true);
 }
 
@@ -697,6 +742,7 @@ static const Property fdcan_props[] = {
     DEFINE_PROP_LINK("msg-ram", Stm32h7FdcanState, msg_ram, TYPE_MEMORY_REGION, MemoryRegion *),
     DEFINE_PROP_BOOL("g4", Stm32h7FdcanState, g4, false),
     DEFINE_PROP_UINT32("msg-ram-offset", Stm32h7FdcanState, ram_offset, 0),
+    DEFINE_PROP_UINT32("rx-frame-ns", Stm32h7FdcanState, rx_frame_ns, 0),
 };
 
 static void fdcan_class_init(ObjectClass *klass, void *data)
