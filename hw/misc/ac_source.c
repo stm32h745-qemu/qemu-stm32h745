@@ -18,6 +18,9 @@
  *    ("rc-us", steady state gain and phase lag). Mode "opto": the node an
  *    optocoupler transistor with a pull-up drives: "opto-high-mv" while it
  *    does not conduct, "opto-low-mv" while it does, with first-order RC edges.
+ *    The node charges with "rc-us" and discharges (conducting) with
+ *    "rc-fall-us" when that is set: a filter capacitor on the node gives a
+ *    ripple between two levels instead of a full swing while AC is present.
  *
  * Everything can be changed at runtime with qom-set (frequency, phase,
  * amplitude/offset/threshold, enable): the phase stays continuous across a
@@ -55,6 +58,7 @@ struct AcSourceState {
     bool enabled;
     bool invert;
     double rc_us;
+    double rc_fall_us;          /* < 0: same as rc_us */
     double opto_high, opto_low;
     char *analog_mode;          /* "sine" or "opto" */
     bool opto_analog;
@@ -107,7 +111,7 @@ static bool conducting_at(AcSourceState *s, int64_t t)
 static double opto_mv(AcSourceState *s, int64_t t)
 {
     double target = s->conducting ? s->opto_low : s->opto_high;
-    double tau = s->rc_us * 1e3;     /* ns */
+    double tau = (s->conducting && s->rc_fall_us >= 0 ? s->rc_fall_us : s->rc_us) * 1e3; /* ns */
 
     if (tau <= 0 || t <= s->edge_t) {
         return tau <= 0 ? target : s->edge_v;
@@ -244,7 +248,7 @@ static void rebase(AcSourceState *s)
 }
 
 enum {
-    P_FREQ, P_PHASE, P_AMP, P_OFFSET, P_THR, P_ENABLED, P_HALF, P_INVERT, P_RC, P_OHI, P_OLO,
+    P_FREQ, P_PHASE, P_AMP, P_OFFSET, P_THR, P_ENABLED, P_HALF, P_INVERT, P_RC, P_OHI, P_OLO, P_RCF,
 };
 
 static void prop_get(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
@@ -267,6 +271,7 @@ static void prop_get(Object *obj, Visitor *v, const char *name, void *opaque, Er
     case P_RC: d = s->rc_us; break;
     case P_OHI: d = s->opto_high; break;
     case P_OLO: d = s->opto_low; break;
+    case P_RCF: d = s->rc_fall_us; break;
     default: return;
     }
     visit_type_number(v, name, &d, errp);
@@ -323,6 +328,7 @@ static void prop_set(Object *obj, Visitor *v, const char *name, void *opaque, Er
         case P_RC: s->rc_us = d; return;
         case P_OHI: s->opto_high = d; return;
         case P_OLO: s->opto_low = d; return;
+        case P_RCF: s->rc_fall_us = d; return;
         }
     }
     refresh(s);
@@ -345,6 +351,7 @@ static void ac_init(Object *obj)
     s->enabled = true;
     s->opto_high = 3300;
     s->opto_low = 0;
+    s->rc_fall_us = -1;
     add_prop(obj, "freq-mhz", "uint64", P_FREQ, "frequency in milli-Hz");
     add_prop(obj, "phase-deg", "number", P_PHASE, "phase at t=0 in degrees (runtime change steps the wave)");
     add_prop(obj, "amplitude-mv", "number", P_AMP, "sine amplitude (mV)");
@@ -354,6 +361,8 @@ static void ac_init(Object *obj)
     add_prop(obj, "half-wave", "int", P_HALF, "0 full wave, 1 positive only, 2 negative only");
     add_prop(obj, "invert", "bool", P_INVERT, "digital output low while conducting");
     add_prop(obj, "rc-us", "number", P_RC, "first order RC time constant of the analog output (us)");
+    add_prop(obj, "rc-fall-us", "number", P_RCF,
+             "opto mode: RC time constant while conducting (us); < 0 uses rc-us");
     add_prop(obj, "opto-high-mv", "number", P_OHI, "opto analog node level while not conducting (mV)");
     add_prop(obj, "opto-low-mv", "number", P_OLO, "opto analog node level while conducting (mV)");
 }
